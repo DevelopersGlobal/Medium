@@ -7,6 +7,7 @@ on:
 
 permissions:
   contents: write
+  pull-requests: write
 
 jobs:
   update:
@@ -17,17 +18,38 @@ jobs:
         with:
           node-version: 22
           cache: npm
-      - run: npm ci
+      - run: npm ci --ignore-scripts
       - name: Fetch latest articles
         run: node scripts/fetch-articles.js
-      - name: Commit changes
+      - name: Check the result
+        id: check
         run: |
-          if git diff --quiet -- data/articles.json; then
-            echo "No new articles."
-            exit 0
+          count=$(node -e "console.log(require('./data/articles.json').articles.length)")
+          if [ "$count" -lt 1 ]; then
+            echo "Feed returned no articles; leaving data unchanged."
+            git checkout -- data/articles.json
+            exit 1
           fi
+          # lastUpdate changes on every run, so compare the article list only.
+          git show HEAD:data/articles.json > /tmp/old.json
+          if node -e "const a=require('/tmp/old.json').articles,b=require('./data/articles.json').articles;process.exit(JSON.stringify(a)===JSON.stringify(b)?0:1)"; then
+            echo "No new articles."
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Open a pull request
+        if: steps.check.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          branch=auto/update-medium-articles
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -B "$branch"
           git add data/articles.json
           git commit -m "Update Medium articles"
-          git push
+          git push --force origin "$branch"
+          if [ -z "$(gh pr list --head "$branch" --state open --json number --jq '.[0].number')" ]; then
+            gh pr create --base main --head "$branch" --title "Update Medium articles" --body "Automated refresh of data/articles.json from the Medium feed."
+          fi
